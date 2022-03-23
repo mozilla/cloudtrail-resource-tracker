@@ -1,0 +1,220 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Lambda function which processes CloudTrail records and persists information about the creation and deletion of AWS resources
+Metadata:
+  Source: https://github.com/mozilla/cloudtrail-resource-tracker/blob/master/cloudtrail-resource-tracker.yaml
+Parameters:
+  SNSTopic:
+    Type: String
+    Description: SNS Topic to subscribe the Lambda function to
+Resources:
+  CloudTrailResourceTrackerFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: AllowLambdaLogging
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+  CloudTrailResourceTrackerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Function which processes CloudTrail records and persists information about the creation and deletion of AWS resources
+      Code: build/
+      Environment:
+        Variables:
+          SNS_TOPIC: !Ref SNSTopic
+      Handler: cloudtrail_resource_tracker.process_cloudtrail.lambda_handler
+      Runtime: python3.8
+      Role: !GetAtt CloudTrailResourceTrackerFunctionRole.Arn
+      Tags:
+        - Key: application
+          Value: cloudtrail-resource-tracker
+        - Key: stack
+          Value: !Ref AWS::StackName
+        - Key: source
+          Value: https://github.com/mozilla/cloudtrail-resource-tracker/
+      Timeout: 900
+  CloudTrailResourceTrackerFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      # Let's hope that the Lambda function doesn't execute before this LogGroup
+      # resource is created, creating the LogGroup with no expiration and
+      # preventing this resource from creating
+      LogGroupName: !Join [ '/', ['/aws/lambda', !Ref 'CloudTrailResourceTrackerFunction' ] ]
+      RetentionInDays: 14
+  CloudTrailResourceTrackerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:invokeFunction
+      FunctionName: !GetAtt CloudTrailResourceTrackerFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join [ '', [ 'arn:aws:execute-api:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref 'CloudTrailResourceTrackerApi', '/*/*' ] ]
+  CloudTrailResourceTrackerApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref CloudTrailResourceTrackerApiDeployment
+      MethodSettings:
+        - DataTraceEnabled: true
+          HttpMethod: '*'
+          # LoggingLevel: INFO
+          ResourcePath: /*
+      RestApiId: !Ref CloudTrailResourceTrackerApi
+      Tags:
+        - Key: application
+          Value: federated-aws-rp
+        - Key: stack
+          Value: !Ref AWS::StackName
+        - Key: source
+          Value: https://github.com/mozilla-iam/federated-aws-rp/
+      # Description: x
+      # StageName: LATEST
+  CloudTrailResourceTrackerApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - CloudTrailResourceTrackerRequest
+    Properties:
+      RestApiId: !Ref CloudTrailResourceTrackerApi
+      StageName: DummyStage
+      # Deployment with an Empty Embedded Stage
+      # The following instructional text is no longer present in the AWS
+      # documentation for AWS::ApiGateway::Deployment StageName and it's not
+      # clear if it still applies.
+      #
+      # "Note This property is required by API Gateway. We recommend that you
+      # specify a name using any value (see Examples) and that you don’t use
+      # this stage. We recommend not using this stage because it is tied to
+      # this deployment, which means you can’t delete one without deleting the
+      # other. For example, if you delete this deployment, API Gateway also
+      # deletes this stage, which you might want to keep. Instead, use the
+      # AWS::ApiGateway::Stage resource to create and associate a stage with
+      # this deployment."
+  CloudTrailResourceTrackerResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref CloudTrailResourceTrackerApi
+      ParentId: !GetAtt CloudTrailResourceTrackerApi.RootResourceId
+      PathPart: '{proxy+}'
+  CloudTrailResourceTrackerRequest:
+    DependsOn: CloudTrailResourceTrackerLambdaPermission
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        Type: AWS_PROXY
+        # IntegrationHttpMethod is POST regardless of the HttpMethod for this resource
+        # https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html#set-up-lambda-proxy-integration-using-cli
+        # "For Lambda integrations, you must use the HTTP method of POST for the
+        # integration request, according to the specification of the Lambda service
+        # action for function invocations."
+        IntegrationHttpMethod: POST
+        Uri: !Join [ '', [ 'arn:aws:apigateway:', !Ref 'AWS::Region', ':lambda:path/2015-03-31/functions/', !GetAtt 'CloudTrailResourceTrackerFunction.Arn', '/invocations' ] ]
+      ResourceId: !Ref CloudTrailResourceTrackerResource
+      RestApiId: !Ref CloudTrailResourceTrackerApi
+  CloudTrailResourceTrackerRootRequest:
+    # This resource is necessary to get API Gateway to respond to requests for the '/' path
+    # Without it API Gateway will respond to requests for '/' with the error
+    # {"message":"Missing Authentication Token"}
+    # https://stackoverflow.com/q/46578615/168874
+    # https://stackoverflow.com/q/52909329/168874
+    DependsOn: CloudTrailResourceTrackerLambdaPermission
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        Type: AWS_PROXY
+        # IntegrationHttpMethod is POST regardless of the HttpMethod for this resource
+        # https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html#set-up-lambda-proxy-integration-using-cli
+        # "For Lambda integrations, you must use the HTTP method of POST for the
+        # integration request, according to the specification of the Lambda service
+        # action for function invocations."
+        IntegrationHttpMethod: POST
+        Uri: !Join [ '', [ 'arn:aws:apigateway:', !Ref 'AWS::Region', ':lambda:path/2015-03-31/functions/', !GetAtt 'CloudTrailResourceTrackerFunction.Arn', '/invocations' ] ]
+      # ResourceId must use the RootResourceId attribute of the AWS::ApiGateway::RestApi
+      # https://stackoverflow.com/a/56121914/168874
+      ResourceId: !GetAtt CloudTrailResourceTrackerApi.RootResourceId
+      RestApiId: !Ref CloudTrailResourceTrackerApi
+  CloudTrailResourceTrackerCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: UseCustomDomainName
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !Ref CustomDomainName
+        Comment: !Join [ ':', [!Ref 'AWS::StackName', 'AWS Federated RP CloudFront distribution']]
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          DefaultTTL: 0
+          MinTTL: 0
+          MaxTTL: 0
+          ForwardedValues:
+            Cookies:
+              Forward: all
+            QueryString: true
+            Headers:
+              - '*'
+          TargetOriginId: CloudTrailResourceTrackerCloudFrontOriginId
+          ViewerProtocolPolicy: redirect-to-https
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-cloudfront-distribution-distributionconfig.html#cfn-cloudfront-distribution-distributionconfig-defaultrootobject
+        DefaultRootObject: ''  # "If you don't want to specify a default root object when you create a distribution, include an empty DefaultRootObject element."
+        Enabled: true
+        HttpVersion: http2
+        IPV6Enabled: true
+        #Logging:
+        #  Logging
+        Origins:
+          - CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+            DomainName: !GetAtt CloudTrailResourceTrackerApiGatewayDomainName.RegionalDomainName
+            Id: CloudTrailResourceTrackerCloudFrontOriginId
+            # OriginPath: !Join [ '', [ '/', !Ref 'CloudTrailResourceTrackerApiStage' ] ]
+        PriceClass: PriceClass_100  # US, Canada, Europe, Israel
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateArn
+          MinimumProtocolVersion: TLSv1.2_2018
+          SslSupportMethod: sni-only
+      Tags:
+        - Key: application
+          Value: federated-aws-rp
+        - Key: stack
+          Value: !Ref AWS::StackName
+        - Key: source
+          Value: https://github.com/mozilla-iam/federated-aws-rp/
+Outputs:
+  CloudTrailResourceTrackerUrl:
+    Description: The URL of the AWS Federated RP
+    Value:
+      Fn::If:
+        - UseCustomDomainName
+        - !Join [ '', [ 'https://', !Ref 'CustomDomainName', '/'] ]
+        - !Join [ '', [ 'https://', !Ref 'CloudTrailResourceTrackerApi', '.execute-api.', !Ref 'AWS::Region', '.amazonaws.com/', !Ref 'CloudTrailResourceTrackerApiStage', '/' ] ]
+  RegionalDomainName:
+    Description: CloudTrailResourceTrackerApiGatewayDomainName.RegionalDomainName
+    Value: !GetAtt CloudTrailResourceTrackerApiGatewayDomainName.RegionalDomainName
+  RegionalHostedZoneId:
+    Description: CloudTrailResourceTrackerApiGatewayDomainName.RegionalHostedZoneId
+    Value: !GetAtt CloudTrailResourceTrackerApiGatewayDomainName.RegionalHostedZoneId
+  CloudTrailResourceTrackerApiGatewayDomainNameRef:
+    Description: Ref CloudTrailResourceTrackerApiGatewayDomainName
+    Value: !Ref CloudTrailResourceTrackerApiGatewayDomainName
