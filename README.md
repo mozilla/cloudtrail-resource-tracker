@@ -1,5 +1,9 @@
 # cloudtrail-resource-tracker
 
+## Project Status
+
+This initial idea was rendered and might be useful to folks. I'll archive this repo now as there's no further work planned on it. Feel free to fork or use it for future work.
+
 ## Problem Statement
 During investigation and incident response, it is difficult to determine an owner/operator/admin for a given AWS resource (account, EC2 instance, database, etc.).
 
